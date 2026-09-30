@@ -1,0 +1,43 @@
+name: 云端结果合并回 main
+
+# 云端把结果推到 claude/hello-* 分支后：只改了 outbox/ 就合并到 main 并删除分支。
+on:
+  push:
+    branches:
+      - "claude/hello-**"
+
+permissions:
+  contents: write
+
+concurrency:
+  group: merge
+  cancel-in-progress: false
+
+jobs:
+  merge:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+
+      - name: 检查改动范围并合并
+        env:
+          BRANCH: ${{ github.ref_name }}
+        run: |
+          changed=$(git -c core.quotepath=false diff --name-only "origin/main...origin/$BRANCH")
+          echo "改动的文件："; echo "$changed"
+          outside=$(printf '%s\n' "$changed" | { grep -Ev '^outbox/' || true; } | { grep -v '^$' || true; })
+          if [ -n "$outside" ]; then
+            echo "::error::改动了 outbox/ 以外的文件，未自动合并："; echo "$outside"
+            exit 1
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git checkout main
+          git merge --no-ff "origin/$BRANCH" -m "合并云端结果 $BRANCH"
+          git push origin main
+          git push origin --delete "$BRANCH"
+          echo "## 已合并到 main" >> "$GITHUB_STEP_SUMMARY"
+          printf '%s\n' "$changed" | sed 's/^/- /' >> "$GITHUB_STEP_SUMMARY"

@@ -1,0 +1,61 @@
+name: 上传后触发 Claude 云端
+
+# 往 inbox/ 上传 txt、md、pdf、docx 后，调用 Claude Code 云端 Routine 的 API。
+on:
+  push:
+    branches: [main]
+    paths:
+      - "inbox/**"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  fire:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+
+      - name: 找出本次上传的文件
+        id: find
+        env:
+          BEFORE: ${{ github.event.before }}
+          AFTER: ${{ github.sha }}
+        run: |
+          if [ -z "$BEFORE" ] || [ "$BEFORE" = "0000000000000000000000000000000000000000" ]; then
+            list=$(git -c core.quotepath=false ls-files inbox/)
+          else
+            list=$(git -c core.quotepath=false diff --name-only --diff-filter=AM "$BEFORE" "$AFTER" -- inbox/)
+          fi
+          files=$(printf '%s\n' "$list" | { grep -iE '\.(txt|md|pdf|docx)$' || true; } | jq -R . | jq -sc 'map(select(length > 0))')
+          echo "本次文件：$files"
+          echo "files=$files" >> "$GITHUB_OUTPUT"
+
+      - name: 触发云端
+        if: steps.find.outputs.files != '[]'
+        env:
+          FILES: ${{ steps.find.outputs.files }}
+          FIRE_URL: ${{ secrets.ROUTINE_FIRE_URL }}
+          FIRE_TOKEN: ${{ secrets.ROUTINE_FIRE_TOKEN }}
+        run: |
+          test -n "$FIRE_URL" && test -n "$FIRE_TOKEN" || { echo "::error::缺少 ROUTINE_FIRE_URL 或 ROUTINE_FIRE_TOKEN"; exit 1; }
+          body=$(jq -nc --argjson f "$FILES" '{text: ({files: $f} | tostring)}')
+          echo "发送：$body"
+          resp=$(curl -sS -w '\n%{http_code}' -X POST "$FIRE_URL" \
+            -H "Authorization: Bearer $FIRE_TOKEN" \
+            -H "anthropic-version: 2023-06-01" \
+            -H "Content-Type: application/json" \
+            -d "$body")
+          code=$(echo "$resp" | tail -n1)
+          json=$(echo "$resp" | sed '$d')
+          if [ "$code" != "200" ]; then
+            echo "::error::触发失败（HTTP $code）：$json"
+            exit 1
+          fi
+          url=$(echo "$json" | jq -r '.claude_code_session_url')
+          echo "已触发：$url"
+          echo "云端会话：[$url]($url)" >> "$GITHUB_STEP_SUMMARY"
